@@ -24,12 +24,13 @@ export type Bet = {
 
 export type RoundSnapshot = {
   id: number;
+  status: 'betting' | 'validating';
   startsAt: number;
   bettingEndsAt: number;
   endsAt: number;
-  status: RoundStatus;
   secondsLeft: number;
   bettingSecondsLeft: number;
+  validationSecondsLeft: number;
 };
 
 export type PoolMap = Record<Color, number>;
@@ -75,4 +76,18 @@ export type LedgerEntry = {
   createdAt: number;
   roundId?: number;
   betId?: string;
+};
+export type TronLinkWindow = Window & {
+  tronWeb?: {
+    ready?: boolean;
+    defaultAddress?: {
+      base58?: string;
+    };
+    trx?: {
+      signMessageV2?: (message: string) => Promise<string>;
+    };
+  };
+  tronLink?: {
+    request?: (input: { method: string }) => Promise<{ code?: number; message?: string }>;
+  };
 };

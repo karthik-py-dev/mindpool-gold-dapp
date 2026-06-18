@@ -1,9 +1,6 @@
-﻿import { TronWeb } from "tronweb";
+
 export interface Env {
   DB: D1Database;
-  TRON_NETWORK: string;
-  APP_WALLET_ADDRESS: string;
-  APP_WALLET_PRIVATE_KEY: string;
 }
 
 type Color = "red" | "green" | "violet";
@@ -13,9 +10,7 @@ type RoundStatus = "betting" | "validating";
 const ROUND_MS = 120_000; // 2 minutes
 const BETTING_MS = 90_000; // first 90 seconds betting
 const VALIDATION_MS = 30_000; // last 30 seconds validation
-const AUTH_NONCE_TTL_MS = 5 * 60 * 1000;
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const TRON_FULL_HOST = "https://api.shasta.trongrid.io";
+
 const COLORS: Color[] = ["red", "green", "violet"];
 
 const NUMBER_TO_COLOR: Record<number, Color> = {
@@ -54,6 +49,11 @@ const SPECIAL_COVER_NUMBER: Partial<Record<Color, number>> = {
   green: 5,
 };
 
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
 
 type BalanceRow = {
   available_balance: number;
@@ -102,15 +102,12 @@ type RoundResultCalc = {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: cors });
+    }
 
     const url = new URL(request.url);
-if (request.method === "OPTIONS") {
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders,
-  });
-}
+
     try {
       if (url.pathname === "/health") {
         return json({
@@ -175,168 +172,7 @@ if (request.method === "OPTIONS") {
       if (url.pathname === "/api/current-round" && request.method === "GET") {
         return json(getRoundSnapshot());
       }
-       
-      if (url.pathname === "/api/app-wallet" && request.method === "GET") {
-  return json({
-    ok: true,
-    network: env.TRON_NETWORK || "shasta",
-    appWalletAddress: env.APP_WALLET_ADDRESS,
-    note: "Send only testnet assets to this wallet.",
-  });
-  
-}
-if (url.pathname === "/api/auth/nonce" && request.method === "POST") {
-  const body = (await request.json()) as {
-    walletAddress?: string;
-  };
 
-  const walletAddress = normalizeWallet(body.walletAddress);
-
-  if (!walletAddress) {
-    return json({ error: "walletAddress is required" }, 400);
-  }
-
-  const nonce = randomToken(24);
-  const now = Date.now();
-  const expiresAt = now + AUTH_NONCE_TTL_MS;
-
-  const plainMessage =
-    `MindPool Gold Testnet Login\n` +
-    `Wallet: ${walletAddress}\n` +
-    `Nonce: ${nonce}\n` +
-    `Expires: ${expiresAt}\n` +
-    `Network: ${env.TRON_NETWORK || "shasta"}`;
-
-  const message = textToHex(plainMessage);
-  const nonceId = id("nonce");
-
-  await env.DB.prepare(`
-    INSERT INTO auth_nonces
-    (id, wallet_address, message, nonce, expires_at, used)
-    VALUES (?, ?, ?, ?, ?, 0)
-  `).bind(nonceId, walletAddress, message, nonce, expiresAt).run();
-
-  return json({
-    ok: true,
-    walletAddress,
-    nonceId,
-    message,
-    plainMessage,
-    expiresAt,
-  });
-}
-
-if (url.pathname === "/api/auth/verify" && request.method === "POST") {
-  const body = (await request.json()) as {
-    walletAddress?: string;
-    nonceId?: string;
-    message?: string;
-    signature?: string;
-    referrerCode?: string;
-  };
-
-  const walletAddress = normalizeWallet(body.walletAddress);
-
-  if (!walletAddress || !body.nonceId || !body.message || !body.signature) {
-    return json(
-      { error: "walletAddress, nonceId, message and signature are required" },
-      400
-    );
-  }
-
-  const nonceRow = await env.DB.prepare(`
-    SELECT id, wallet_address, message, expires_at, used
-    FROM auth_nonces
-    WHERE id = ?
-    LIMIT 1
-  `).bind(body.nonceId).first<{
-    id: string;
-    wallet_address: string;
-    message: string;
-    expires_at: number;
-    used: number;
-  }>();
-
-  if (!nonceRow) {
-    return json({ error: "Invalid nonce" }, 400);
-  }
-
-  if (Number(nonceRow.used) === 1) {
-    return json({ error: "Nonce already used" }, 400);
-  }
-
-  if (Date.now() > Number(nonceRow.expires_at)) {
-    return json({ error: "Nonce expired" }, 400);
-  }
-
-  if (
-    nonceRow.wallet_address !== walletAddress ||
-    nonceRow.message !== body.message
-  ) {
-    return json({ error: "Nonce message mismatch" }, 400);
-  }
-
-  const recoveredAddress = await verifyTronSignature(
-    body.message,
-    body.signature
-  );
-
-  if (recoveredAddress !== walletAddress) {
-    return json(
-      {
-        error: "Signature wallet mismatch",
-        recoveredAddress,
-        walletAddress,
-      },
-      401
-    );
-  }
-
-  await env.DB.prepare(`
-    UPDATE auth_nonces
-    SET used = 1
-    WHERE id = ?
-  `).bind(body.nonceId).run();
-
-  await ensureUser(env, walletAddress, body.referrerCode);
-
-  const sessionToken = randomToken(48);
-  const tokenHash = await sha256Hex(sessionToken);
-  const sessionId = id("sess");
-  const sessionExpiresAt = Date.now() + SESSION_TTL_MS;
-
-  await env.DB.prepare(`
-    INSERT INTO auth_sessions
-    (id, wallet_address, token_hash, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).bind(sessionId, walletAddress, tokenHash, sessionExpiresAt).run();
-
-  return json({
-    ok: true,
-    walletAddress,
-    sessionToken,
-    expiresAt: sessionExpiresAt,
-    appWalletAddress: env.APP_WALLET_ADDRESS,
-    balance: await getBalance(env, walletAddress),
-    referralCode: makeReferralCode(walletAddress),
-  });
-}
-
-if (url.pathname === "/api/auth/me" && request.method === "GET") {
-  const auth = await getSessionWallet(request, env);
-
-  if (!auth) {
-    return json({ error: "Unauthorized" }, 401);
-  }
-
-  return json({
-    ok: true,
-    walletAddress: auth.walletAddress,
-    appWalletAddress: env.APP_WALLET_ADDRESS,
-    balance: await getBalance(env, auth.walletAddress),
-    referralCode: makeReferralCode(auth.walletAddress),
-  });
-}
       if (url.pathname === "/api/register" && request.method === "POST") {
         const body = (await request.json()) as {
           walletAddress?: string;
@@ -574,11 +410,11 @@ if (url.pathname === "/api/auth/me" && request.method === "GET") {
             betId
           ),
 
-         env.DB.prepare(`
-  INSERT INTO coin_ledger
-  (id, wallet_address, type, amount, note, round_id, bet_id)
-  VALUES (?, ?, 'fee_house', ?, '5% referral commission pool', ?, ?)
-`).bind(id("ledger"), walletAddress, house, roundId, betId),
+          env.DB.prepare(`
+            INSERT INTO coin_ledger
+            (id, wallet_address, type, amount, note, round_id, bet_id)
+            VALUES (?, ?, 'fee_house', ?, ''5% referral commission pool'', ?, ?)
+          `).bind(id("ledger"), walletAddress, house, roundId, betId),
 
           env.DB.prepare(`
             INSERT INTO coin_ledger
@@ -808,218 +644,6 @@ if (url.pathname === "/api/referral-earnings" && request.method === "GET") {
     earnings: rows.results ?? [],
   });
 }
-if (url.pathname === "/api/wallet-summary" && request.method === "GET") {
-  const auth = await getSessionWallet(request, env);
-
-  if (!auth) {
-    return json({ error: "Unauthorized. Please sign in with wallet." }, 401);
-  }
-
-  const walletAddress = auth.walletAddress;
-
-  await ensureUser(env, walletAddress);
-
-  const coinBalance = await getBalance(env, walletAddress);
-
-  const depositStats = await env.DB.prepare(`
-    SELECT
-      COALESCE(SUM(test_usdt_amount), 0) as total_test_usdt_bought,
-      COALESCE(SUM(gold_coin_amount), 0) as total_gold_coins_bought
-    FROM deposits
-    WHERE wallet_address = ?
-      AND status = 'mock_completed'
-  `).bind(walletAddress).first<{
-    total_test_usdt_bought: number;
-    total_gold_coins_bought: number;
-  }>();
-
-  const sellStats = await env.DB.prepare(`
-    SELECT
-      COALESCE(SUM(gold_coin_amount), 0) as total_gold_coins_sold,
-      COALESCE(SUM(test_usdt_amount), 0) as total_test_usdt_ready
-    FROM withdrawals
-    WHERE wallet_address = ?
-      AND status = 'ready_for_withdrawal'
-  `).bind(walletAddress).first<{
-    total_gold_coins_sold: number;
-    total_test_usdt_ready: number;
-  }>();
-
-  const usdtBalance = await env.DB.prepare(`
-    SELECT available_usdt, withdrawn_usdt, updated_at
-    FROM test_usdt_balances
-    WHERE wallet_address = ?
-  `).bind(walletAddress).first<{
-    available_usdt: number;
-    withdrawn_usdt: number;
-    updated_at: string;
-  }>();
-
-  return json({
-    ok: true,
-    walletAddress,
-    gold: {
-      available: coinBalance.available_balance,
-      locked: coinBalance.locked_balance,
-      totalBought: Number(depositStats?.total_gold_coins_bought || 0),
-      totalSold: Number(sellStats?.total_gold_coins_sold || 0),
-    },
-    usdt: {
-      totalBought: Number(depositStats?.total_test_usdt_bought || 0),
-      availableForWithdrawal: Number(usdtBalance?.available_usdt || 0),
-      withdrawn: Number(usdtBalance?.withdrawn_usdt || 0),
-      readyFromSales: Number(sellStats?.total_test_usdt_ready || 0),
-    },
-    rate: {
-      testUsdtToGold: "1 test USDT = 100 Gold Coins",
-      goldToTestUsdt: "100 Gold Coins = 1 test USDT",
-    },
-  });
-}
-if (url.pathname === "/api/sell-coins" && request.method === "POST") {
-  const auth = await getSessionWallet(request, env);
-
-  if (!auth) {
-    return json({ error: "Unauthorized. Please sign in with wallet." }, 401);
-  }
-
-  const body = (await request.json()) as {
-    goldCoinAmount?: number;
-  };
-
-  const walletAddress = auth.walletAddress;
-  const goldCoinAmount = round2(Number(body.goldCoinAmount));
-
-  if (!goldCoinAmount || goldCoinAmount <= 0) {
-    return json({ error: "Positive goldCoinAmount is required" }, 400);
-  }
-
-  await ensureUser(env, walletAddress);
-  await ensureTestUsdtBalance(env, walletAddress);
-
-  const balance = await getBalance(env, walletAddress);
-
-  if (balance.available_balance < goldCoinAmount) {
-    return json({
-      error: "Insufficient Gold Coin balance",
-      balance,
-    }, 400);
-  }
-
-  const testUsdtAmount = round2(goldCoinAmount / 100);
-  const withdrawalId = id("sell");
-
-  await env.DB.batch([
-    env.DB.prepare(`
-      UPDATE coin_balances
-      SET available_balance = available_balance - ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE wallet_address = ?
-    `).bind(goldCoinAmount, walletAddress),
-
-    env.DB.prepare(`
-      INSERT INTO withdrawals
-      (id, wallet_address, gold_coin_amount, test_usdt_amount, status)
-      VALUES (?, ?, ?, ?, 'ready_for_withdrawal')
-    `).bind(withdrawalId, walletAddress, goldCoinAmount, testUsdtAmount),
-
-    env.DB.prepare(`
-      UPDATE test_usdt_balances
-      SET available_usdt = available_usdt + ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE wallet_address = ?
-    `).bind(testUsdtAmount, walletAddress),
-
-    env.DB.prepare(`
-      INSERT INTO coin_ledger
-      (id, wallet_address, type, amount, note)
-      VALUES (?, ?, 'sell_debit', ?, ?)
-    `).bind(
-      id("ledger"),
-      walletAddress,
-      goldCoinAmount,
-      `Sold ${goldCoinAmount} Gold Coins for ${testUsdtAmount} test USDT. Ready for withdrawal.`
-    ),
-  ]);
-
-  return json({
-    ok: true,
-    walletAddress,
-    soldGoldCoins: goldCoinAmount,
-    readyForWithdrawalTestUsdt: testUsdtAmount,
-    balance: await getBalance(env, walletAddress),
-  });
-}
-
-if (url.pathname === "/api/withdraw-test-usdt" && request.method === "POST") {
-  const auth = await getSessionWallet(request, env);
-
-  if (!auth) {
-    return json({ error: "Unauthorized. Please sign in with wallet." }, 401);
-  }
-
-  const body = (await request.json()) as {
-    testUsdtAmount?: number;
-  };
-
-  const walletAddress = auth.walletAddress;
-  const testUsdtAmount = round2(Number(body.testUsdtAmount));
-
-  if (!testUsdtAmount || testUsdtAmount <= 0) {
-    return json({ error: "Positive testUsdtAmount is required" }, 400);
-  }
-
-  await ensureUser(env, walletAddress);
-  await ensureTestUsdtBalance(env, walletAddress);
-
-  const usdtBalance = await env.DB.prepare(`
-    SELECT available_usdt, withdrawn_usdt
-    FROM test_usdt_balances
-    WHERE wallet_address = ?
-  `).bind(walletAddress).first<{
-    available_usdt: number;
-    withdrawn_usdt: number;
-  }>();
-
-  const availableUsdt = Number(usdtBalance?.available_usdt || 0);
-
-  if (availableUsdt < testUsdtAmount) {
-    return json({
-      error: "Insufficient withdrawable test USDT",
-      availableUsdt,
-    }, 400);
-  }
-
-  const withdrawalId = id("wd");
-
-  await env.DB.batch([
-    env.DB.prepare(`
-      UPDATE test_usdt_balances
-      SET available_usdt = available_usdt - ?,
-          withdrawn_usdt = withdrawn_usdt + ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE wallet_address = ?
-    `).bind(testUsdtAmount, testUsdtAmount, walletAddress),
-
-    env.DB.prepare(`
-      INSERT INTO coin_ledger
-      (id, wallet_address, type, amount, note)
-      VALUES (?, ?, 'withdrawal_debit', ?, ?)
-    `).bind(
-      id("ledger"),
-      walletAddress,
-      testUsdtAmount * 100,
-      `Withdrawn ${testUsdtAmount} test USDT to ${walletAddress}`
-    ),
-  ]);
-
-  return json({
-    ok: true,
-    withdrawalId,
-    walletAddress,
-    withdrawnTestUsdt: testUsdtAmount,
-  });
-}
       return json({ error: "Not found" }, 404);
     } catch (error) {
       return json(
@@ -1032,110 +656,16 @@ if (url.pathname === "/api/withdraw-test-usdt" && request.method === "POST") {
   },
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
-      ...corsHeaders,
+      ...cors,
     },
   });
 }
-async function verifyTronSignature(
-  message: string,
-  signature: string
-): Promise<string> {
-  const tronWeb = new TronWeb({
-    fullHost: TRON_FULL_HOST,
-  });
 
-  const recoveredAddress = await tronWeb.trx.verifyMessageV2(message, signature);
-
-  return String(recoveredAddress || "").trim();
-}
-
-async function getSessionWallet(
-  request: Request,
-  env: Env
-): Promise<{ walletAddress: string } | null> {
-  const authHeader = request.headers.get("Authorization") || "";
-
-  if (!authHeader.startsWith("Bearer ")) {
-    return null;
-  }
-
-  const token = authHeader.replace("Bearer ", "").trim();
-
-  if (!token) {
-    return null;
-  }
-
-  const tokenHash = await sha256Hex(token);
-
-  const session = await env.DB.prepare(`
-    SELECT wallet_address, expires_at
-    FROM auth_sessions
-    WHERE token_hash = ?
-    LIMIT 1
-  `).bind(tokenHash).first<{
-    wallet_address: string;
-    expires_at: number;
-  }>();
-
-  if (!session) {
-    return null;
-  }
-
-  if (Date.now() > Number(session.expires_at)) {
-    return null;
-  }
-
-  return {
-    walletAddress: session.wallet_address,
-  };
-}
-
-function textToHex(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-
-  return (
-    "0x" +
-    Array.from(bytes)
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("")
-  );
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function randomToken(bytes = 32): string {
-  const array = new Uint8Array(bytes);
-  crypto.getRandomValues(array);
-
-  return Array.from(array)
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-async function ensureTestUsdtBalance(env: Env, walletAddress: string) {
-  await env.DB.prepare(`
-    INSERT OR IGNORE INTO test_usdt_balances
-    (wallet_address, available_usdt, withdrawn_usdt)
-    VALUES (?, 0, 0)
-  `).bind(walletAddress).run();
-}
 async function ensureUser(env: Env, walletAddress: string, referrerCode?: string) {
   const referralCode = makeReferralCode(walletAddress);
 
@@ -1161,7 +691,6 @@ async function ensureUser(env: Env, walletAddress: string, referrerCode?: string
     (wallet_address, available_balance, locked_balance)
     VALUES (?, 0, 0)
   `).bind(walletAddress).run();
-  await ensureTestUsdtBalance(env, walletAddress);
 }
 
 async function getBalance(env: Env, walletAddress: string): Promise<BalanceRow> {
@@ -1644,4 +1173,50 @@ function hashString(input: string): number {
 
   return Math.abs(hash >>> 0);
 }
+async function buildReferralCommissionStatements(input: {
+  env: Env;
+  playerWallet: string;
+  betId: string;
+  roundId: number;
+  referralPool: number;
+}): Promise<D1PreparedStatement[]> {
+  const { env, playerWallet, betId, roundId, referralPool } = input;
 
+function shortWallet(wallet: string): string {
+  if (wallet.length <= 10) return wallet;
+  return `${wallet.slice(0, 5)}...${wallet.slice(-4)}`;
+}
+
+function selectionLabel(bet: BetRow) {
+  if (bet.kind === "number") return `#${bet.number}`;
+  return bet.color.toUpperCase();
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function id(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+function makeReferralCode(wallet: string): string {
+  return `MP${wallet.replace(/[^a-z0-9]/gi, "").slice(-6).toUpperCase()}`;
+}
+
+function normalizeWallet(wallet?: string | null): string {
+  return String(wallet || "").trim();
+}
+
+function hashString(input: string): number {
+  let hash = 2166136261;
+
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return Math.abs(hash >>> 0);
+}

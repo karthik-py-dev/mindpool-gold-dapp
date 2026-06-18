@@ -1,8 +1,0 @@
-name = "mindpool-worker"
-main = "src/index.ts"
-compatibility_date = "2026-06-18"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "mindpool_gold"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"

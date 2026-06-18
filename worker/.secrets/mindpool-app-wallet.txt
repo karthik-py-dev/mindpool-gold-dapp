@@ -1,0 +1,11 @@
+MINDPOOL GOLD TESTNET APP WALLET
+================================
+Address Base58: TBti2MFvWR17kYyJxvoYGVgvG7nCPLPGFy
+Address Hex: 41151665F86144514DA0D5FDAEB12EE748147DC644
+Private Key: AB38EDDD0D4D59CF69E4F97917DC034907D8144104E6DA7694E25B1BB3AC50EB
+
+IMPORTANT:
+1. Do not upload this file to GitHub.
+2. Do not paste private key in frontend.
+3. Address goes in wrangler.toml.
+4. Private key goes only into Cloudflare secret.

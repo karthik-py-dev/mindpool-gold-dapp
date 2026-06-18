@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AppView, Bet, BetSelection, LedgerEntry, LedgerTab, LedgerType, RoundResult, WalletState } from './types';
+import {
+  apiSellCoins,
+  apiGetLedger,
+  apiWalletSummary,
+  apiWithdrawTestUsdt,
+  type WalletSummary
+} from './lib/api';
+
+import type { AppView, Bet, BetSelection,  LedgerEntry, LedgerTab, LedgerType, RoundResult, WalletState } from './types';
 import {
   buildPools,
   calculateFees,
@@ -7,6 +15,7 @@ import {
   COLORS,
   getActivityLabel,
   getRoundSnapshot,
+  
   getSelectionLabel,
   NUMBER_MULTIPLIER,
   NUMBER_TO_COLOR,
@@ -43,6 +52,7 @@ const CREDIT_TYPES: LedgerType[] = ['topup_credit', 'deposit_credit', 'winnings_
 export default function App() {
   const [wallet, setWallet] = useState<WalletState>(defaultWallet);
   const [view, setView] = useState<AppView>('game');
+  const [walletSummary, setWalletSummary] = useState<WalletSummary | null>(null);
   const [balance, setGoldBalance] = useState(() => getBalance());
   const [bets, setBets] = useState<Bet[]>(() => getBets());
   const [results, setResults] = useState<RoundResult[]>(() => getResults());
@@ -53,7 +63,11 @@ export default function App() {
   const [amount, setAmount] = useState(100);
   const [walletAmount, setWalletAmount] = useState(1000);
   const [message, setMessage] = useState('Educational TRON testnet build. No real money.');
+  const [sellAmount, setSellAmount] = useState(100);
+const [withdrawAmount, setWithdrawAmount] = useState(1);
+const [isSelling, setIsSelling] = useState(false);
 
+const [isWithdrawing, setIsWithdrawing] = useState(false);
   const round = useMemo(() => getRoundSnapshot(now), [now]);
   const currentRoundBets = useMemo(() => bets.filter((bet) => bet.roundId === round.id), [bets, round.id]);
   const lastResult = results[0];
@@ -184,59 +198,107 @@ export default function App() {
     setMessage(`Added ${formatCoins(coins)} Gold Coins.`);
   }
 
-  function handleSellCoins() {
-    if (!wallet.connected) {
-      setMessage('Connect wallet before selling coins.');
-      return;
-    }
-    const safeAmount = clampAmount(walletAmount);
-    if (safeAmount <= 0 || safeAmount > balance) {
-      setMessage('Enter a valid sell amount within your Gold Coin balance.');
-      return;
-    }
-    const usdt = safeAmount / 100;
-    const nextBalance = balance - safeAmount;
-    syncBalance(nextBalance);
-    appendLedger([
-      {
-        id: makeId('ledger'),
-        type: 'sell_debit',
-        category: 'withdrawal',
-        amount: safeAmount,
-        note: `Sell coins: ${safeAmount} coins → ${usdt.toFixed(2)} test USDT`,
-        createdAt: Date.now()
-      }
-    ]);
-    setLedger(getLedger());
-    setMessage(`Sold ${formatCoins(safeAmount)} coins in demo mode.`);
-  }
+  async function handleSellCoins() {
+  if (isSelling) return;
 
-  function handleWithdrawCoins() {
+  try {
+    setIsSelling(true);
+
+    if (!wallet.connected || wallet.isDemo) {
+      setMessage('Connect TronLink wallet before selling coins.');
+      return;
+    }
+
+    const safeAmount = clampAmount(sellAmount);
+
+    if (safeAmount <= 0) {
+      setMessage('Enter valid Gold Coins amount.');
+      return;
+    }
+
+    setMessage('Selling coins through backend...');
+
+    const res = await apiSellCoins(safeAmount);
+
+    setGoldBalance(res.balance.available_balance);
+
+    const summary = await apiWalletSummary();
+    setWalletSummary(summary);
+    setWithdrawAmount(summary.usdt.availableForWithdrawal || 1);
+
+    try {
+      const remoteLedger = await apiGetLedger(wallet.address);
+      setLedger(remoteLedger);
+    } catch {
+      // ignore ledger refresh error
+    }
+
+    setMessage(
+      `Sold ${res.soldGoldCoins} Gold Coins. ${res.readyForWithdrawalTestUsdt} test USDT is ready for withdrawal.`
+    );
+  } catch (error) {
+    setMessage(error instanceof Error ? error.message : 'Sell failed.');
+  } finally {
+    window.setTimeout(() => {
+      setIsSelling(false);
+    }, 1000);
+  }
+}
+
+  async function handleWithdrawCoins() {
+  if (isWithdrawing) return;
+
+  try {
+    setIsWithdrawing(true);
+
     if (!wallet.connected) {
       setMessage('Connect wallet before withdrawal.');
       return;
     }
-    const safeAmount = clampAmount(walletAmount);
-    if (safeAmount <= 0 || safeAmount > balance) {
-      setMessage('Enter a valid withdraw amount within your Gold Coin balance.');
+
+    const withdrawableUsdt = walletSummary?.usdt.availableForWithdrawal ?? 0;
+    const safeUsdtAmount = Math.max(0, Number(withdrawAmount || 0));
+
+    if (withdrawableUsdt <= 0) {
+      setMessage('No withdrawable test USDT. Sell Gold Coins first.');
       return;
     }
-    const usdt = safeAmount / 100;
-    const nextBalance = balance - safeAmount;
-    syncBalance(nextBalance);
-    appendLedger([
-      {
-        id: makeId('ledger'),
-        type: 'withdrawal_debit',
-        category: 'withdrawal',
-        amount: safeAmount,
-        note: `Withdraw request: ${safeAmount} coins → ${usdt.toFixed(2)} test USDT to ${shortAddress(wallet.address)}`,
-        createdAt: Date.now()
-      }
-    ]);
-    setLedger(getLedger());
-    setMessage(`Withdrawal ledger added for ${formatCoins(safeAmount)} coins.`);
+
+    if (safeUsdtAmount <= 0) {
+      setMessage('Enter a valid USDT amount.');
+      return;
+    }
+
+    if (safeUsdtAmount > withdrawableUsdt) {
+      setMessage(`You can withdraw only ${withdrawableUsdt} test USDT.`);
+      return;
+    }
+
+    setMessage('Withdrawing test USDT... please wait.');
+
+    const res = await apiWithdrawTestUsdt(safeUsdtAmount);
+
+    const summary = await apiWalletSummary();
+    setWalletSummary(summary);
+
+    try {
+      const remoteLedger = await apiGetLedger(wallet.address);
+      setLedger(remoteLedger);
+    } catch {
+      // Ignore ledger refresh error
+    }
+
+    setMessage(
+      `Withdrawn ${res.withdrawnTestUsdt} test USDT to ${shortAddress(wallet.address)}.`
+    );
+  } catch (error) {
+    setMessage(error instanceof Error ? error.message : 'Withdrawal failed.');
+  } finally {
+    window.setTimeout(() => {
+      setIsWithdrawing(false);
+    }, 1000);
   }
+}
 
   function handlePlaceBet() {
     if (!wallet.connected) {
@@ -327,7 +389,7 @@ export default function App() {
           <h1>MindPool Gold</h1>
           <p className="auth-copy">Clean single-screen color prediction experience. Connect your TRON testnet wallet to continue.</p>
           <button className="connect-main" onClick={handleConnect}>Connect TronLink Wallet</button>
-          <button className="connect-demo" onClick={handleConnect}>Use Demo Wallet</button>
+          <button className="connect-demo" disabled>Use Demo Wallet</button>
           <div className="auth-rules">
             <span>USDT → Gold Coins</span>
             <span>Lowest pool wins</span>
@@ -543,11 +605,26 @@ export default function App() {
                 <div className="wallet-convert-card">
                   <label>Coins amount</label>
                   <input type="number" min="1" value={walletAmount} onChange={(event) => setWalletAmount(Number(event.target.value))} />
+                  
                   <small>{formatCoins(walletAmount)} coins ≈ {(walletAmount / 100).toFixed(2)} test USDT</small>
                   <div className="convert-actions">
                     <button onClick={handleSellCoins}>Sell Coins</button>
-                    <button onClick={handleWithdrawCoins}>Withdraw</button>
                   </div>
+                  <div className="wallet-convert-card">
+                   <label>Usdt amount</label>
+                   <input
+  type="number"
+  min="0"
+  step="0.01"
+  value={withdrawAmount}
+  onChange={(event) => setWithdrawAmount(Number(event.target.value))}
+/>
+<div className='convert-actions'>
+<button onClick={handleWithdrawCoins} disabled={isWithdrawing}>
+  {isWithdrawing ? 'Withdrawing...' : 'Withdraw'}
+</button></div></div>
+                   
+
                 </div>
               </section>
             </section>
